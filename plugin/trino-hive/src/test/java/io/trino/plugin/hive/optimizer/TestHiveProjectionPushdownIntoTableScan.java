@@ -28,6 +28,7 @@ import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HiveHdfsConfiguration;
 import io.trino.plugin.hive.HiveTableHandle;
 import io.trino.plugin.hive.NodeVersion;
+import io.trino.plugin.hive.TestingHiveConnectorFactory;
 import io.trino.plugin.hive.authentication.HiveIdentity;
 import io.trino.plugin.hive.authentication.NoHdfsAuthentication;
 import io.trino.plugin.hive.metastore.Database;
@@ -35,7 +36,6 @@ import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.hive.metastore.MetastoreConfig;
 import io.trino.plugin.hive.metastore.file.FileHiveMetastore;
 import io.trino.plugin.hive.metastore.file.FileHiveMetastoreConfig;
-import io.trino.plugin.hive.testing.TestingHiveConnectorFactory;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -128,7 +128,7 @@ public class TestHiveProjectionPushdownIntoTableScan
                 session,
                 any(
                         project(
-                                ImmutableMap.of("expr", expression("col0.a"), "expr_2", expression("col0.b")),
+                                ImmutableMap.of("expr", expression("col0[1]"), "expr_2", expression("col0[2]")),
                                 tableScan(testTable, ImmutableMap.of("col0", "col0")))));
     }
 
@@ -160,7 +160,8 @@ public class TestHiveProjectionPushdownIntoTableScan
         assertPlan(
                 "SELECT col0.x expr_x, col0.y expr_y FROM " + testTable,
                 any(tableScan(
-                        equalTo(tableHandle.get().getConnectorHandle()),
+                        equalTo(((HiveTableHandle) tableHandle.get().getConnectorHandle())
+                                .withProjectedColumns(ImmutableSet.of(columnX, columnY))),
                         TupleDomain.all(),
                         ImmutableMap.of("col0#x", equalTo(columnX), "col0#y", equalTo(columnY)))));
 
@@ -171,8 +172,13 @@ public class TestHiveProjectionPushdownIntoTableScan
                         filter(
                                 "col0_y = BIGINT '2' AND (col0_x =  cast((col1 + 3) as BIGINT))",
                                 tableScan(
-                                        table -> ((HiveTableHandle) table).getCompactEffectivePredicate().getDomains().get()
-                                                .equals(ImmutableMap.of(columnY, Domain.singleValue(BIGINT, 2L))),
+                                        table -> {
+                                            HiveTableHandle hiveTableHandle = (HiveTableHandle) table;
+                                            return hiveTableHandle.getCompactEffectivePredicate().equals(TupleDomain.withColumnDomains(
+                                                    ImmutableMap.of(columnY, Domain.singleValue(BIGINT, 2L)))) &&
+                                                    hiveTableHandle.getProjectedColumns().equals(Optional.of(
+                                                            ImmutableSet.of(column1Handle, columnX, columnY)));
+                                        },
                                         TupleDomain.all(),
                                         ImmutableMap.of("col0_y", equalTo(columnY), "col0_x", equalTo(columnX), "col1", equalTo(column1Handle))))));
 
@@ -183,8 +189,13 @@ public class TestHiveProjectionPushdownIntoTableScan
                         filter(
                                 "col0_x = BIGINT '5'",
                                 tableScan(
-                                        table -> ((HiveTableHandle) table).getCompactEffectivePredicate().getDomains().get()
-                                                .equals(ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 5L))),
+                                        table -> {
+                                            HiveTableHandle hiveTableHandle = (HiveTableHandle) table;
+                                            return hiveTableHandle.getCompactEffectivePredicate().equals(TupleDomain.withColumnDomains(
+                                                    ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 5L)))) &&
+                                                    hiveTableHandle.getProjectedColumns().equals(Optional.of(
+                                                            ImmutableSet.of(column0Handle, columnX)));
+                                        },
                                         TupleDomain.all(),
                                         ImmutableMap.of("col0", equalTo(column0Handle), "col0_x", equalTo(columnX))))));
 
@@ -194,9 +205,9 @@ public class TestHiveProjectionPushdownIntoTableScan
                 anyTree(
                         project(
                                 ImmutableMap.of(
-                                        "expr_0_x", expression("expr_0.x"),
+                                        "expr_0_x", expression("expr_0[1]"),
                                         "expr_0", expression("expr_0"),
-                                        "expr_0_y", expression("expr_0.y")),
+                                        "expr_0_y", expression("expr_0[2]")),
                                 join(
                                         INNER,
                                         ImmutableList.of(equiJoinClause("t_expr_1", "s_expr_1")),
@@ -210,7 +221,8 @@ public class TestHiveProjectionPushdownIntoTableScan
                                                                 ImmutableMap.of("expr_0_x", equalTo(columnX), "expr_0", equalTo(column0Handle), "t_expr_1", equalTo(column1Handle))))),
                                         anyTree(
                                                 tableScan(
-                                                        equalTo(tableHandle.get().getConnectorHandle()),
+                                                        equalTo(((HiveTableHandle) tableHandle.get().getConnectorHandle())
+                                                                .withProjectedColumns(ImmutableSet.of(column1Handle))),
                                                         TupleDomain.all(),
                                                         ImmutableMap.of("s_expr_1", equalTo(column1Handle))))))));
     }

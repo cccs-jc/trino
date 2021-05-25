@@ -31,6 +31,7 @@ import org.jline.reader.LineReaderBuilder;
 import org.jline.reader.UserInterruptException;
 import org.jline.terminal.Terminal;
 import org.jline.utils.AttributedStringBuilder;
+import org.jline.utils.InfoCmp;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
@@ -161,25 +162,26 @@ public class Console
         try (QueryRunner queryRunner = new QueryRunner(
                 session,
                 clientOptions.debug,
-                Optional.ofNullable(clientOptions.socksProxy),
-                Optional.ofNullable(clientOptions.httpProxy),
-                Optional.ofNullable(clientOptions.keystorePath),
-                Optional.ofNullable(clientOptions.keystorePassword),
-                Optional.ofNullable(clientOptions.keystoreType),
-                Optional.ofNullable(clientOptions.truststorePath),
-                Optional.ofNullable(clientOptions.truststorePassword),
-                Optional.ofNullable(clientOptions.truststoreType),
+                clientOptions.socksProxy,
+                clientOptions.httpProxy,
+                clientOptions.keystorePath,
+                clientOptions.keystorePassword,
+                clientOptions.keystoreType,
+                clientOptions.truststorePath,
+                clientOptions.truststorePassword,
+                clientOptions.truststoreType,
                 clientOptions.insecure,
-                Optional.ofNullable(clientOptions.accessToken),
-                Optional.ofNullable(clientOptions.user),
+                clientOptions.accessToken,
+                clientOptions.user,
                 clientOptions.password ? Optional.of(getPassword()) : Optional.empty(),
-                Optional.ofNullable(clientOptions.krb5Principal),
-                Optional.ofNullable(clientOptions.krb5ServicePrincipalPattern),
-                Optional.ofNullable(clientOptions.krb5RemoteServiceName),
-                Optional.ofNullable(clientOptions.krb5ConfigPath),
-                Optional.ofNullable(clientOptions.krb5KeytabPath),
-                Optional.ofNullable(clientOptions.krb5CredentialCachePath),
-                !clientOptions.krb5DisableRemoteServiceHostnameCanonicalization)) {
+                clientOptions.krb5Principal,
+                clientOptions.krb5ServicePrincipalPattern,
+                clientOptions.krb5RemoteServiceName,
+                clientOptions.krb5ConfigPath,
+                clientOptions.krb5KeytabPath,
+                clientOptions.krb5CredentialCachePath,
+                !clientOptions.krb5DisableRemoteServiceHostnameCanonicalization,
+                clientOptions.externalAuthentication)) {
             if (hasQuery) {
                 return executeCommand(
                         queryRunner,
@@ -201,7 +203,7 @@ public class Console
 
     private String getPassword()
     {
-        checkState(clientOptions.user != null, "Username must be specified along with password");
+        checkState(clientOptions.user.isPresent(), "Username must be specified along with password");
         String defaultPassword = System.getenv("TRINO_PASSWORD");
         if (defaultPassword != null) {
             return defaultPassword;
@@ -258,6 +260,11 @@ public class Console
                     case "exit":
                     case "quit":
                         return;
+                    case "clear":
+                        Terminal terminal = reader.getTerminal();
+                        terminal.puts(InfoCmp.Capability.clear_screen);
+                        terminal.flush();
+                        continue;
                     case "history":
                         for (History.Entry entry : reader.getHistory()) {
                             System.out.println(new AttributedStringBuilder()

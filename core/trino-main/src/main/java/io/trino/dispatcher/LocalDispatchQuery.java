@@ -219,6 +219,12 @@ public class LocalDispatchQuery
     }
 
     @Override
+    public Optional<Duration> getPlanningTime()
+    {
+        return stateMachine.getPlanningTime();
+    }
+
+    @Override
     public Optional<DateTime> getEndTime()
     {
         return stateMachine.getEndTime();
@@ -312,6 +318,10 @@ public class LocalDispatchQuery
             return tryGetFutureValue(queryExecutionFuture);
         }
         catch (Exception ignored) {
+            return Optional.empty();
+        }
+        catch (Error e) {
+            log.error(e, "Unhandled Error stored in queryExecutionFuture");
             return Optional.empty();
         }
     }

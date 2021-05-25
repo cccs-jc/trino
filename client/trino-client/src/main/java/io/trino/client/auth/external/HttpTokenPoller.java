@@ -23,11 +23,14 @@ import net.jodah.failsafe.RetryPolicy;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.Response;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.time.Duration;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.net.HttpHeaders.USER_AGENT;
@@ -46,11 +49,24 @@ public class HttpTokenPoller
     private static final String USER_AGENT_VALUE = "TrinoTokenPoller/" +
             firstNonNull(HttpTokenPoller.class.getPackage().getImplementationVersion(), "unknown");
 
-    private final OkHttpClient client;
+    private final Supplier<OkHttpClient> client;
 
     public HttpTokenPoller(OkHttpClient client)
     {
-        this.client = requireNonNull(client, "client is null");
+        requireNonNull(client, "client is null");
+        this.client = () -> client;
+    }
+
+    public HttpTokenPoller(OkHttpClient client, Consumer<OkHttpClient.Builder> refreshableClientConfig)
+    {
+        requireNonNull(client, "client is null");
+        requireNonNull(refreshableClientConfig, "refreshableClientConfig is null");
+
+        this.client = () -> {
+            OkHttpClient.Builder builder = client.newBuilder();
+            refreshableClientConfig.accept(builder);
+            return builder.build();
+        };
     }
 
     @Override
@@ -62,7 +78,7 @@ public class HttpTokenPoller
                     .withMaxDuration(timeout)
                     .withBackoff(100, 500, MILLIS)
                     .handle(IOException.class))
-                    .get(() -> executePoll(createRequest(tokenUri)));
+                    .get(() -> executePoll(prepareRequestBuilder(tokenUri).build()));
         }
         catch (FailsafeException e) {
             if (e.getCause() instanceof IOException) {
@@ -72,7 +88,34 @@ public class HttpTokenPoller
         }
     }
 
-    private static Request createRequest(URI tokenUri)
+    @Override
+    public void tokenReceived(URI tokenUri)
+    {
+        try {
+            Failsafe.with(new RetryPolicy<Integer>()
+                    .withMaxAttempts(-1)
+                    .withMaxDuration(Duration.ofSeconds(4))
+                    .withBackoff(100, 500, MILLIS)
+                    .handleResultIf(code -> code != HTTP_OK))
+                    .get(() -> {
+                        Request request = prepareRequestBuilder(tokenUri)
+                                .delete()
+                                .build();
+                        try (Response response = client.get().newCall(request)
+                                .execute()) {
+                            return response.code();
+                        }
+                    });
+        }
+        catch (FailsafeException e) {
+            if (e.getCause() instanceof IOException) {
+                throw new UncheckedIOException((IOException) e.getCause());
+            }
+            throw e;
+        }
+    }
+
+    private static Request.Builder prepareRequestBuilder(URI tokenUri)
     {
         HttpUrl url = HttpUrl.get(tokenUri);
         if (url == null) {
@@ -81,8 +124,7 @@ public class HttpTokenPoller
 
         return new Request.Builder()
                 .url(url)
-                .addHeader(USER_AGENT, USER_AGENT_VALUE)
-                .build();
+                .addHeader(USER_AGENT, USER_AGENT_VALUE);
     }
 
     private TokenPollResult executePoll(Request request)
@@ -107,7 +149,7 @@ public class HttpTokenPoller
             throws IOException
     {
         try {
-            return execute(TOKEN_POLL_CODEC, client, request);
+            return execute(TOKEN_POLL_CODEC, client.get(), request);
         }
         catch (UncheckedIOException e) {
             throw e.getCause();

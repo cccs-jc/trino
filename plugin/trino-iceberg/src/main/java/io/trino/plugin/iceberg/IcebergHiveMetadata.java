@@ -152,21 +152,27 @@ public class IcebergHiveMetadata
     @Override
     public List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
     {
-        List<SchemaTableName> tablesList = schemaName.map(Collections::singletonList)
+        ImmutableList.Builder<SchemaTableName> tablesListBuilder = ImmutableList.builder();
+        schemaName.map(Collections::singletonList)
                 .orElseGet(metastore::getAllDatabases)
                 .stream()
-                .flatMap(schema -> metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE).stream()
-                        .map(table -> new SchemaTableName(schema, table))
-                        .collect(toList())
-                        .stream())
-                .collect(toList());
+                .flatMap(schema -> Stream.concat(
+                        // Get tables with parameter table_type set to  "ICEBERG" or "iceberg". This is required because
+                        // Trino uses lowercase value whereas Spark and Flink use uppercase.
+                        // TODO: use one metastore call to pass both the filters: https://github.com/trinodb/trino/issues/7710
+                        metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE.toLowerCase(Locale.ENGLISH)).stream()
+                                .map(table -> new SchemaTableName(schema, table)),
+                        metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE.toUpperCase(Locale.ENGLISH)).stream()
+                                .map(table -> new SchemaTableName(schema, table)))
+                        .distinct())  // distinct() to avoid duplicates for case-insensitive HMS backends
+                .forEach(tablesListBuilder::add);
 
         schemaName.map(Collections::singletonList)
                 .orElseGet(metastore::getAllDatabases).stream()
                 .flatMap(schema -> metastore.getAllViews(schema).stream()
                         .map(table -> new SchemaTableName(schema, table)))
-                .forEach(schemaTableName -> tablesList.add(schemaTableName));
-        return tablesList;
+                .forEach(tablesListBuilder::add);
+        return tablesListBuilder.build();
     }
 
     @Override
@@ -174,7 +180,7 @@ public class IcebergHiveMetadata
     {
         Optional<String> location = getSchemaLocation(properties).map(uri -> {
             try {
-                hdfsEnvironment.getFileSystem(new HdfsContext(session, schemaName), new Path(uri));
+                hdfsEnvironment.getFileSystem(new HdfsContext(session), new Path(uri));
             }
             catch (IOException | IllegalArgumentException e) {
                 throw new TrinoException(INVALID_SCHEMA_PROPERTY, "Invalid location URI: " + uri, e);
@@ -327,7 +333,8 @@ public class IcebergHiveMetadata
                 .setParameters(viewProperties)
                 .withStorage(storage -> storage.setStorageFormat(VIEW_STORAGE_FORMAT))
                 .withStorage(storage -> storage.setLocation(""))
-                .setViewOriginalText(Optional.of(encodeMaterializedViewData(definition)))
+                .setViewOriginalText(Optional.of(
+                        encodeMaterializedViewData(fromConnectorMaterializedViewDefinition(definition))))
                 .setViewExpandedText(Optional.of("/* Presto Materialized View */"));
         Table table = tableBuilder.build();
         PrincipalPrivileges principalPrivileges = buildInitialPrivilegeSet(session.getUser());

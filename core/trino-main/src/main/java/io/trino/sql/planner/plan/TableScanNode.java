@@ -14,22 +14,31 @@
 package io.trino.sql.planner.plan;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.Symbol;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -40,8 +49,10 @@ public class TableScanNode
     private final List<Symbol> outputSymbols;
     private final Map<Symbol, ColumnHandle> assignments; // symbol -> column
 
+    @Nullable // null on workers
     private final TupleDomain<ColumnHandle> enforcedConstraint;
-    private final boolean forDelete;
+    private final boolean updateTarget;
+    private final Optional<Boolean> useConnectorNodePartitioning;
 
     // We need this factory method to disambiguate with the constructor used for deserializing
     // from a json object. The deserializer sets some fields which are never transported
@@ -51,27 +62,34 @@ public class TableScanNode
             TableHandle table,
             List<Symbol> outputs,
             Map<Symbol, ColumnHandle> assignments,
-            boolean forDelete)
+            boolean updateTarget,
+            Optional<Boolean> useConnectorNodePartitioning)
     {
-        return new TableScanNode(id, table, outputs, assignments, TupleDomain.all(), forDelete);
+        return new TableScanNode(id, table, outputs, assignments, TupleDomain.all(), updateTarget, useConnectorNodePartitioning);
     }
 
+    /*
+     * This constructor is for JSON deserialization only. Do not use.
+     * It's marked as @Deprecated to help avoid usage, and not because we plan to remove it.
+     */
+    @Deprecated
     @JsonCreator
     public TableScanNode(
             @JsonProperty("id") PlanNodeId id,
             @JsonProperty("table") TableHandle table,
             @JsonProperty("outputSymbols") List<Symbol> outputs,
             @JsonProperty("assignments") Map<Symbol, ColumnHandle> assignments,
-            @JsonProperty("forDelete") boolean forDelete)
+            @JsonProperty("updateTarget") boolean updateTarget,
+            @JsonProperty("useConnectorNodePartitioning") Optional<Boolean> useConnectorNodePartitioning)
     {
-        // This constructor is for JSON deserialization only. Do not use.
         super(id);
         this.table = requireNonNull(table, "table is null");
         this.outputSymbols = ImmutableList.copyOf(requireNonNull(outputs, "outputs is null"));
         this.assignments = ImmutableMap.copyOf(requireNonNull(assignments, "assignments is null"));
         checkArgument(assignments.keySet().containsAll(outputs), "assignments does not cover all of outputs");
         this.enforcedConstraint = null;
-        this.forDelete = forDelete;
+        this.updateTarget = updateTarget;
+        this.useConnectorNodePartitioning = requireNonNull(useConnectorNodePartitioning, "useConnectorNodePartitioning is null");
     }
 
     public TableScanNode(
@@ -80,15 +98,43 @@ public class TableScanNode
             List<Symbol> outputs,
             Map<Symbol, ColumnHandle> assignments,
             TupleDomain<ColumnHandle> enforcedConstraint,
-            boolean forDelete)
+            boolean updateTarget,
+            Optional<Boolean> useConnectorNodePartitioning)
     {
         super(id);
         this.table = requireNonNull(table, "table is null");
         this.outputSymbols = ImmutableList.copyOf(requireNonNull(outputs, "outputs is null"));
         this.assignments = ImmutableMap.copyOf(requireNonNull(assignments, "assignments is null"));
         checkArgument(assignments.keySet().containsAll(outputs), "assignments does not cover all of outputs");
-        this.enforcedConstraint = requireNonNull(enforcedConstraint, "enforcedConstraint is null");
-        this.forDelete = forDelete;
+        requireNonNull(enforcedConstraint, "enforcedConstraint is null");
+        validateEnforcedConstraint(enforcedConstraint, outputs, assignments);
+        this.enforcedConstraint = enforcedConstraint;
+        this.updateTarget = updateTarget;
+        this.useConnectorNodePartitioning = requireNonNull(useConnectorNodePartitioning, "useConnectorNodePartitioning is null");
+    }
+
+    private static void validateEnforcedConstraint(TupleDomain<ColumnHandle> enforcedConstraint, List<Symbol> outputs, Map<Symbol, ColumnHandle> assignments)
+    {
+        if (enforcedConstraint.isAll() || enforcedConstraint.isNone()) {
+            return;
+        }
+        Map<ColumnHandle, Domain> domains = enforcedConstraint.getDomains().orElseThrow();
+
+        Set<ColumnHandle> visibleColumns = outputs.stream()
+                .map(assignments::get)
+                .map(Objects::requireNonNull)
+                .collect(toImmutableSet());
+
+        domains.keySet().stream()
+                .filter(column -> !visibleColumns.contains(column))
+                .findAny()
+                .ifPresent(column -> {
+                    throw new IllegalArgumentException(format(
+                            "enforcedConstraint references a column that is not part of the plan. " +
+                                    "enforcedConstraint keys: %s, visibleColumns: %s",
+                            domains.keySet(),
+                            visibleColumns));
+                });
     }
 
     @JsonProperty("table")
@@ -118,6 +164,7 @@ public class TableScanNode
      * This field is used to make sure that predicates which were previously pushed down
      * do not get lost in subsequent refinements of the table layout.
      */
+    @JsonIgnore
     public TupleDomain<ColumnHandle> getEnforcedConstraint()
     {
         // enforcedConstraint can be pretty complex. As a result, it may incur a significant cost to serialize, store, and transport.
@@ -125,10 +172,22 @@ public class TableScanNode
         return enforcedConstraint;
     }
 
-    @JsonProperty("forDelete")
-    public boolean isForDelete()
+    @JsonProperty("updateTarget")
+    public boolean isUpdateTarget()
     {
-        return forDelete;
+        return updateTarget;
+    }
+
+    @JsonProperty("useConnectorNodePartitioning")
+    public Optional<Boolean> getUseConnectorNodePartitioning()
+    {
+        return useConnectorNodePartitioning;
+    }
+
+    public boolean isUseConnectorNodePartitioning()
+    {
+        return useConnectorNodePartitioning
+                .orElseThrow(() -> new VerifyException("useConnectorNodePartitioning is not present"));
     }
 
     @Override
@@ -151,7 +210,7 @@ public class TableScanNode
                 .add("outputSymbols", outputSymbols)
                 .add("assignments", assignments)
                 .add("enforcedConstraint", enforcedConstraint)
-                .add("forDelete", forDelete)
+                .add("updateTarget", updateTarget)
                 .toString();
     }
 
@@ -160,5 +219,17 @@ public class TableScanNode
     {
         checkArgument(newChildren.isEmpty(), "newChildren is not empty");
         return this;
+    }
+
+    public TableScanNode withUseConnectorNodePartitioning(boolean useConnectorNodePartitioning)
+    {
+        return new TableScanNode(
+                getId(),
+                table,
+                outputSymbols,
+                assignments,
+                enforcedConstraint,
+                updateTarget,
+                Optional.of(useConnectorNodePartitioning));
     }
 }

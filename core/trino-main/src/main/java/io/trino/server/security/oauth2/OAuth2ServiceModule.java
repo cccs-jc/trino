@@ -23,6 +23,7 @@ import io.airlift.units.Duration;
 import io.jsonwebtoken.SigningKeyResolver;
 import io.trino.server.security.jwt.JwkService;
 import io.trino.server.security.jwt.JwkSigningKeyResolver;
+import io.trino.server.ui.OAuth2WebUiInstalled;
 
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +40,8 @@ public class OAuth2ServiceModule
     protected void setup(Binder binder)
     {
         jaxrsBinder(binder).bind(OAuth2CallbackResource.class);
+        newOptionalBinder(binder, OAuth2WebUiInstalled.class);
+        newOptionalBinder(binder, OAuth2TokenExchange.class);
 
         configBinder(binder).bindConfig(OAuth2Config.class);
         binder.bind(OAuth2Service.class).in(Scopes.SINGLETON);
@@ -46,7 +49,17 @@ public class OAuth2ServiceModule
                 .setDefault()
                 .to(ScribeJavaOAuth2Client.class)
                 .in(Scopes.SINGLETON);
-        httpClientBinder(binder).bindHttpClient("oauth2-jwk", ForOAuth2.class);
+        httpClientBinder(binder)
+                .bindHttpClient("oauth2-jwk", ForOAuth2.class)
+                // Reset to defaults to override InternalCommunicationModule changes to this client default configuration.
+                // Setting a keystore and/or a truststore for internal communication changes the default SSL configuration
+                // for all clients in this guice context. This does not make sense for this client which will very rarely
+                // use the same SSL configuration, so using the system default truststore makes more sense.
+                .withConfigDefaults(config -> config
+                        .setKeyStorePath(null)
+                        .setKeyStorePassword(null)
+                        .setTrustStorePath(null)
+                        .setTrustStorePassword(null));
     }
 
     @Provides
@@ -54,7 +67,9 @@ public class OAuth2ServiceModule
     @ForOAuth2
     public static SigningKeyResolver createSigningKeyResolver(OAuth2Config oauth2Config, @ForOAuth2 HttpClient httpClient)
     {
-        return new JwkSigningKeyResolver(new JwkService(URI.create(oauth2Config.getJwksUrl()), httpClient, new Duration(15, TimeUnit.MINUTES)));
+        JwkService jwkService = new JwkService(URI.create(oauth2Config.getJwksUrl()), httpClient, new Duration(15, TimeUnit.MINUTES));
+        jwkService.start();
+        return new JwkSigningKeyResolver(jwkService);
     }
 
     @Override

@@ -22,6 +22,8 @@ import io.trino.matching.Pattern;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableLayoutResult;
+import io.trino.metadata.TableProperties;
+import io.trino.metadata.TableProperties.TablePartitioning;
 import io.trino.operator.scalar.TryFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.Constraint;
@@ -32,7 +34,6 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.ExpressionInterpreter;
 import io.trino.sql.planner.LookupSymbolResolver;
-import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolsExtractor;
 import io.trino.sql.planner.TypeAnalyzer;
@@ -50,6 +51,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Sets.intersection;
 import static io.trino.SystemSessionProperties.isAllowPushdownIntoConnectors;
@@ -107,12 +109,11 @@ public class PushPredicateIntoTableScan
         TableScanNode tableScan = captures.get(TABLE_SCAN);
 
         Optional<PlanNode> rewritten = pushFilterIntoTableScan(
+                filterNode,
                 tableScan,
-                filterNode.getPredicate(),
                 false,
                 context.getSession(),
                 context.getSymbolAllocator().getTypes(),
-                context.getIdAllocator(),
                 metadata,
                 typeOperators,
                 typeAnalyzer,
@@ -147,17 +148,22 @@ public class PushPredicateIntoTableScan
     }
 
     public static Optional<PlanNode> pushFilterIntoTableScan(
+            FilterNode filterNode,
             TableScanNode node,
-            Expression predicate,
             boolean pruneWithPredicateExpression,
             Session session,
             TypeProvider types,
-            PlanNodeIdAllocator idAllocator,
             Metadata metadata,
             TypeOperators typeOperators,
             TypeAnalyzer typeAnalyzer,
             DomainTranslator domainTranslator)
     {
+        if (!isAllowPushdownIntoConnectors(session)) {
+            return Optional.empty();
+        }
+
+        Expression predicate = filterNode.getPredicate();
+
         // don't include non-deterministic predicates
         Expression deterministicPredicate = filterDeterministicConjuncts(metadata, predicate);
         Expression nonDeterministicPredicate = filterNonDeterministicConjuncts(metadata, predicate);
@@ -170,7 +176,7 @@ public class PushPredicateIntoTableScan
                 types);
 
         TupleDomain<ColumnHandle> newDomain = decomposedPredicate.getTupleDomain()
-                .transform(node.getAssignments()::get)
+                .transformKeys(node.getAssignments()::get)
                 .intersect(node.getEnforcedConstraint());
 
         Map<ColumnHandle, Symbol> assignments = ImmutableBiMap.copyOf(node.getAssignments()).inverse();
@@ -189,7 +195,7 @@ public class PushPredicateIntoTableScan
                             deterministicPredicate,
                             // Simplify the tuple domain to avoid creating an expression with too many nodes,
                             // which would be expensive to evaluate in the call to isCandidate below.
-                            domainTranslator.toPredicate(newDomain.simplify().transform(assignments::get))));
+                            domainTranslator.toPredicate(newDomain.simplify().transformKeys(assignments::get))));
             constraint = new Constraint(newDomain, evaluator::isCandidate, evaluator.getArguments());
         }
         else {
@@ -199,6 +205,7 @@ public class PushPredicateIntoTableScan
         }
 
         TableHandle newTable;
+        Optional<TablePartitioning> newTablePartitioning;
         TupleDomain<ColumnHandle> remainingFilter;
         if (!metadata.usesLegacyTableLayouts(session, node.getTable())) {
             // check if new domain is wider than domain already provided by table scan
@@ -210,7 +217,7 @@ public class PushPredicateIntoTableScan
                         decomposedPredicate.getRemainingExpression());
 
                 if (!TRUE_LITERAL.equals(resultingPredicate)) {
-                    return Optional.of(new FilterNode(idAllocator.getNextId(), node, resultingPredicate));
+                    return Optional.of(new FilterNode(filterNode.getId(), node, resultingPredicate));
                 }
 
                 return Optional.of(node);
@@ -231,7 +238,9 @@ public class PushPredicateIntoTableScan
 
             newTable = result.get().getHandle();
 
-            if (metadata.getTableProperties(session, newTable).getPredicate().isNone()) {
+            TableProperties newTableProperties = metadata.getTableProperties(session, newTable);
+            newTablePartitioning = newTableProperties.getTablePartitioning();
+            if (newTableProperties.getPredicate().isNone()) {
                 return Optional.of(new ValuesNode(node.getId(), node.getOutputSymbols(), ImmutableList.of()));
             }
 
@@ -251,8 +260,11 @@ public class PushPredicateIntoTableScan
             }
 
             newTable = layout.get().getNewTableHandle();
+            newTablePartitioning = layout.get().getTableProperties().getTablePartitioning();
             remainingFilter = layout.get().getUnenforcedConstraint();
         }
+
+        verifyTablePartitioning(session, metadata, node, newTablePartitioning);
 
         TableScanNode tableScan = new TableScanNode(
                 node.getId(),
@@ -260,19 +272,38 @@ public class PushPredicateIntoTableScan
                 node.getOutputSymbols(),
                 node.getAssignments(),
                 computeEnforced(newDomain, remainingFilter),
-                node.isForDelete());
+                node.isUpdateTarget(),
+                node.getUseConnectorNodePartitioning());
 
         Expression resultingPredicate = createResultingPredicate(
                 metadata,
-                domainTranslator.toPredicate(remainingFilter.transform(assignments::get)),
+                domainTranslator.toPredicate(remainingFilter.transformKeys(assignments::get)),
                 nonDeterministicPredicate,
                 decomposedPredicate.getRemainingExpression());
 
         if (!TRUE_LITERAL.equals(resultingPredicate)) {
-            return Optional.of(new FilterNode(idAllocator.getNextId(), tableScan, resultingPredicate));
+            return Optional.of(new FilterNode(filterNode.getId(), tableScan, resultingPredicate));
         }
 
         return Optional.of(tableScan);
+    }
+
+    // PushPredicateIntoTableScan might be executed after AddExchanges and DetermineTableScanNodePartitioning.
+    // In that case, table scan node partitioning (if present) was used to fragment plan with ExchangeNodes.
+    // Therefore table scan node partitioning should not change after AddExchanges is executed since it would
+    // make plan with ExchangeNodes invalid.
+    private static void verifyTablePartitioning(
+            Session session,
+            Metadata metadata,
+            TableScanNode oldTableScan,
+            Optional<TablePartitioning> newTablePartitioning)
+    {
+        if (oldTableScan.getUseConnectorNodePartitioning().isEmpty()) {
+            return;
+        }
+
+        Optional<TablePartitioning> oldTablePartitioning = metadata.getTableProperties(session, oldTableScan.getTable()).getTablePartitioning();
+        verify(newTablePartitioning.equals(oldTablePartitioning), "Partitioning must not change after predicate is pushed down");
     }
 
     static Expression createResultingPredicate(
@@ -302,7 +333,7 @@ public class PushPredicateIntoTableScan
         {
             this.assignments = assignments;
 
-            evaluator = ExpressionInterpreter.expressionOptimizer(expression, metadata, session, typeAnalyzer.getTypes(session, types, expression));
+            evaluator = new ExpressionInterpreter(expression, metadata, session, typeAnalyzer.getTypes(session, types, expression));
             arguments = SymbolsExtractor.extractUnique(expression).stream()
                     .map(assignments::get)
                     .collect(toImmutableSet());

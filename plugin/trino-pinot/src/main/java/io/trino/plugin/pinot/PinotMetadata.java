@@ -38,6 +38,7 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.ArrayType;
 import org.apache.pinot.spi.data.Schema;
 
 import javax.inject.Inject;
@@ -226,7 +227,7 @@ public class PinotMetadata
         }
         Optional<DynamicTable> dynamicTable = handle.getQuery();
         if (dynamicTable.isPresent() &&
-                (!dynamicTable.get().getLimit().isPresent() || dynamicTable.get().getLimit().getAsLong() > limit)) {
+                (dynamicTable.get().getLimit().isEmpty() || dynamicTable.get().getLimit().getAsLong() > limit)) {
             dynamicTable = Optional.of(new DynamicTable(dynamicTable.get().getTableName(),
                     dynamicTable.get().getSuffix(),
                     dynamicTable.get().getSelections(),
@@ -253,7 +254,9 @@ public class PinotMetadata
     {
         PinotTableHandle handle = (PinotTableHandle) table;
         TupleDomain<ColumnHandle> oldDomain = handle.getConstraint();
-        TupleDomain<ColumnHandle> newDomain = oldDomain.intersect(constraint.getSummary());
+        // Pinot does not support array literals
+        TupleDomain<ColumnHandle> newDomain = oldDomain.intersect(constraint.getSummary())
+                .filter((columnHandle, domain) -> !(((PinotColumnHandle) columnHandle).getDataType() instanceof ArrayType));
         if (oldDomain.equals(newDomain)) {
             return Optional.empty();
         }
@@ -387,7 +390,7 @@ public class PinotMetadata
 
     private List<SchemaTableName> listTables(ConnectorSession session, SchemaTablePrefix prefix)
     {
-        if (!prefix.getSchema().isPresent() || !prefix.getTable().isPresent()) {
+        if (prefix.getSchema().isEmpty() || prefix.getTable().isEmpty()) {
             return listTables(session, Optional.empty());
         }
         return ImmutableList.of(new SchemaTableName(prefix.getSchema().get(), prefix.getTable().get()));

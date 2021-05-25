@@ -20,16 +20,18 @@ import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.JwtException;
 import io.trino.server.security.UserMapping;
 import io.trino.server.security.UserMappingException;
+import io.trino.server.security.oauth2.NonceCookie;
 import io.trino.server.security.oauth2.OAuth2Config;
 import io.trino.server.security.oauth2.OAuth2Service;
+import io.trino.server.security.oauth2.OAuth2Service.OAuthChallenge;
 import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.Identity;
 
 import javax.inject.Inject;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.Response;
+import javax.ws.rs.core.Response.ResponseBuilder;
 
-import java.net.URI;
 import java.util.List;
 import java.util.Optional;
 
@@ -42,6 +44,7 @@ import static io.trino.server.security.oauth2.OAuth2CallbackResource.CALLBACK_EN
 import static io.trino.server.ui.FormWebUiAuthenticationFilter.DISABLED_LOCATION;
 import static io.trino.server.ui.FormWebUiAuthenticationFilter.DISABLED_LOCATION_URI;
 import static io.trino.server.ui.FormWebUiAuthenticationFilter.TRINO_FORM_LOGIN;
+import static io.trino.server.ui.OAuthWebUiCookie.OAUTH2_COOKIE;
 import static java.util.Objects.requireNonNull;
 import static javax.ws.rs.core.Response.Status.UNAUTHORIZED;
 
@@ -50,6 +53,7 @@ public class OAuth2WebUiAuthenticationFilter
 {
     private static final Logger LOG = Logger.get(OAuth2WebUiAuthenticationFilter.class);
 
+    private final String principalField;
     private final OAuth2Service service;
     private final UserMapping userMapping;
     private final Optional<String> validAudience;
@@ -61,6 +65,7 @@ public class OAuth2WebUiAuthenticationFilter
         requireNonNull(oauth2Config, "oauth2Config is null");
         this.userMapping = UserMapping.createUserMapping(oauth2Config.getUserMappingPattern(), oauth2Config.getUserMappingFile());
         this.validAudience = oauth2Config.getAudience();
+        this.principalField = oauth2Config.getPrincipalField();
     }
 
     @Override
@@ -94,9 +99,15 @@ public class OAuth2WebUiAuthenticationFilter
             return;
         }
         try {
-            String subject = claims.get().getSubject();
-            setAuthenticatedIdentity(request, Identity.forUser(userMapping.mapUser(subject))
-                    .withPrincipal(new BasicPrincipal(subject))
+            Object principal = claims.get().get(principalField);
+            if (!isValidPrincipal(principal)) {
+                LOG.debug("Invalid principal field: %s. Expected principal to be non-empty", principalField);
+                sendErrorMessage(request, UNAUTHORIZED, "Unauthorized");
+                return;
+            }
+            String principalName = (String) principal;
+            setAuthenticatedIdentity(request, Identity.forUser(userMapping.mapUser(principalName))
+                    .withPrincipal(new BasicPrincipal(principalName))
                     .build());
         }
         catch (UserMappingException e) {
@@ -106,7 +117,7 @@ public class OAuth2WebUiAuthenticationFilter
 
     private Optional<Jws<Claims>> getAccessToken(ContainerRequestContext request)
     {
-        return OAuthWebUiCookie.read(request)
+        return OAuthWebUiCookie.read(request.getCookies().get(OAUTH2_COOKIE))
                 .flatMap(token -> {
                     try {
                         return Optional.ofNullable(service.parseClaimsJws(token));
@@ -120,8 +131,15 @@ public class OAuth2WebUiAuthenticationFilter
 
     private void needAuthentication(ContainerRequestContext request)
     {
-        URI redirectLocation = service.startChallenge(request.getUriInfo().getBaseUri().resolve(CALLBACK_ENDPOINT));
-        request.abortWith(Response.seeOther(redirectLocation).build());
+        // send 401 to REST api calls and redirect to others
+        if (request.getUriInfo().getRequestUri().getPath().startsWith("/ui/api/")) {
+            sendWwwAuthenticate(request, "Unauthorized", ImmutableSet.of(TRINO_FORM_LOGIN));
+            return;
+        }
+        OAuthChallenge challenge = service.startWebUiChallenge(request.getUriInfo().getBaseUri().resolve(CALLBACK_ENDPOINT));
+        ResponseBuilder response = Response.seeOther(challenge.getRedirectUrl());
+        challenge.getNonce().ifPresent(nonce -> response.cookie(NonceCookie.create(nonce, challenge.getChallengeExpiration())));
+        request.abortWith(response.build());
     }
 
     private boolean hasValidAudience(Object audience)
@@ -139,5 +157,10 @@ public class OAuth2WebUiAuthenticationFilter
             return ((List<?>) audience).contains(validAudience.get());
         }
         return false;
+    }
+
+    private boolean isValidPrincipal(Object principal)
+    {
+        return principal instanceof String && !((String) principal).isEmpty();
     }
 }

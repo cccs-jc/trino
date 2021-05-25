@@ -27,6 +27,7 @@ import io.trino.testing.datatype.DataType;
 import io.trino.testing.datatype.DataTypeTest;
 import io.trino.testing.datatype.SqlDataTypeTest;
 import io.trino.testing.sql.TrinoSqlExecutor;
+import io.trino.tpch.TpchTable;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
@@ -73,7 +74,7 @@ public class TestPhoenixTypeMapping
             throws Exception
     {
         phoenixServer = TestingPhoenixServer.getInstance();
-        return createPhoenixQueryRunner(phoenixServer, ImmutableMap.of());
+        return createPhoenixQueryRunner(phoenixServer, ImmutableMap.of(), TpchTable.getTables());
     }
 
     @AfterClass(alwaysRun = true)
@@ -233,7 +234,7 @@ public class TestPhoenixTypeMapping
                     .build();
             trinoTestCases.execute(getQueryRunner(), session, trinoCreateAsSelect(session, "test_date"));
             trinoTestCases.execute(getQueryRunner(), session, trinoCreateAsSelect(getSession(), "test_date"));
-            trinoTestCases.execute(getQueryRunner(), session, prestoCreateAndInsert(session, "test_date"));
+            trinoTestCases.execute(getQueryRunner(), session, trinoCreateAndInsert(session, "test_date"));
             phoenixTestCases.execute(getQueryRunner(), session, phoenixCreateAndInsert("tpch.test_date"));
         }
     }
@@ -410,7 +411,7 @@ public class TestPhoenixTypeMapping
         return new CreateAsSelectDataSetup(new TrinoSqlExecutor(getQueryRunner(), session), tableNamePrefix);
     }
 
-    private DataSetup prestoCreateAndInsert(Session session, String tableNamePrefix)
+    private DataSetup trinoCreateAndInsert(Session session, String tableNamePrefix)
     {
         return new CreateAndInsertDataSetup(new TrinoSqlExecutor(getQueryRunner(), session), tableNamePrefix);
     }

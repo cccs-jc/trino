@@ -20,6 +20,7 @@ import io.trino.execution.QueryStats;
 import io.trino.operator.OperatorStats;
 import io.trino.spi.type.Decimals;
 import io.trino.sql.analyzer.FeaturesConfig;
+import io.trino.testng.services.Flaky;
 import io.trino.tests.QueryTemplate;
 import org.intellij.lang.annotations.Language;
 import org.testng.annotations.Test;
@@ -2285,14 +2286,21 @@ public abstract class AbstractTestJoinQueries
     }
 
     @Test
+    @Flaky(issue = "https://github.com/trinodb/trino/issues/5172", match = ".*expected.*but found.*")
     public void testOutputDuplicatesInsensitiveJoin()
     {
         assertJoinOutputPositions(
-                "SELECT n.nationkey, count(*) FROM nation n JOIN (VALUES 0, 0) t(x) ON n.nationkey = t.x GROUP BY n.nationkey",
+                "SELECT n.nationkey, count(*) " +
+                        "FROM nation n " +
+                        "JOIN (SELECT regionkey FROM nation ORDER BY regionkey LIMIT 2) t(x) " +
+                        "ON n.nationkey = t.x GROUP BY n.nationkey",
                 2);
 
         assertJoinOutputPositions(
-                "SELECT n.nationkey FROM nation n JOIN (VALUES 0, 0) t(x) ON n.nationkey = t.x GROUP BY n.nationkey",
+                "SELECT n.nationkey " +
+                        "FROM nation n " +
+                        "JOIN (SELECT regionkey FROM nation ORDER BY regionkey LIMIT 2) t(x) " +
+                        "ON n.nationkey = t.x GROUP BY n.nationkey",
                 1);
 
         assertJoinOutputPositions(
@@ -2309,7 +2317,10 @@ public abstract class AbstractTestJoinQueries
                 26);
 
         assertJoinOutputPositions(
-                "SELECT n.nationkey FROM nation n JOIN (VALUES 0, 0) t(x) ON n.nationkey = t.x GROUP BY GROUPING SETS (n.nationkey), (n.nationkey, n.nationkey)",
+                "SELECT n.nationkey " +
+                        "FROM nation n " +
+                        "JOIN (SELECT regionkey FROM nation ORDER BY regionkey LIMIT 2) t(x) " +
+                        "ON n.nationkey = t.x GROUP BY GROUPING SETS (n.nationkey), (n.nationkey, n.nationkey)",
                 1);
 
         assertJoinOutputPositions(

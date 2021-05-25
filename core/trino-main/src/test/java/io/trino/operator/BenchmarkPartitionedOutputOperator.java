@@ -40,11 +40,7 @@ import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -63,6 +59,7 @@ import static io.trino.execution.buffer.BufferState.OPEN;
 import static io.trino.execution.buffer.BufferState.TERMINAL_BUFFER_STATES;
 import static io.trino.execution.buffer.OutputBuffers.BufferType.PARTITIONED;
 import static io.trino.execution.buffer.OutputBuffers.createInitialEmptyOutputBuffers;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -117,7 +114,9 @@ public class BenchmarkPartitionedOutputOperator
         private PartitionedOutputOperator createPartitionedOutputOperator()
         {
             BlockTypeOperators blockTypeOperators = new BlockTypeOperators(new TypeOperators());
-            PartitionFunction partitionFunction = new LocalPartitionGenerator(new InterpretedHashGenerator(ImmutableList.of(BIGINT), new int[] {0}, blockTypeOperators), PARTITION_COUNT);
+            PartitionFunction partitionFunction = new LocalPartitionGenerator(
+                    new InterpretedHashGenerator(ImmutableList.of(BIGINT), new int[] {0}, blockTypeOperators),
+                    PARTITION_COUNT);
             PagesSerdeFactory serdeFactory = new PagesSerdeFactory(createTestMetadataManager().getBlockEncodingSerde(), false);
             OutputBuffers buffers = createInitialEmptyOutputBuffers(PARTITIONED);
             for (int partition = 0; partition < PARTITION_COUNT; partition++) {
@@ -220,11 +219,9 @@ public class BenchmarkPartitionedOutputOperator
         // assure the benchmarks are valid before running
         BenchmarkData data = new BenchmarkData();
         new BenchmarkPartitionedOutputOperator().addPage(data);
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .jvmArgs("-Xmx10g")
-                .include(".*" + BenchmarkPartitionedOutputOperator.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+
+        benchmark(BenchmarkPartitionedOutputOperator.class)
+                .withOptions(optionsBuilder -> optionsBuilder.jvmArgs("-Xmx10g"))
+                .run();
     }
 }

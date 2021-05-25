@@ -308,7 +308,7 @@ public class RaptorMetadata
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle handle, Constraint constraint)
     {
         RaptorTableHandle table = (RaptorTableHandle) handle;
-        TupleDomain<RaptorColumnHandle> newDomain = constraint.getSummary().transform(RaptorColumnHandle.class::cast);
+        TupleDomain<RaptorColumnHandle> newDomain = constraint.getSummary().transformKeys(RaptorColumnHandle.class::cast);
 
         if (newDomain.equals(table.getConstraint())) {
             return Optional.empty();
@@ -776,7 +776,7 @@ public class RaptorMetadata
     }
 
     @Override
-    public ColumnHandle getUpdateRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    public ColumnHandle getDeleteRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         return shardRowIdHandle();
     }

@@ -74,6 +74,7 @@ import io.trino.metadata.DiscoveryNodeManager;
 import io.trino.metadata.ForNodeManager;
 import io.trino.metadata.HandleJsonModule;
 import io.trino.metadata.InternalNodeManager;
+import io.trino.metadata.MaterializedViewPropertyManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.MetadataManager;
 import io.trino.metadata.SchemaPropertyManager;
@@ -91,11 +92,13 @@ import io.trino.operator.PagesIndex;
 import io.trino.operator.index.IndexJoinLookupStats;
 import io.trino.server.ExpressionSerialization.ExpressionDeserializer;
 import io.trino.server.ExpressionSerialization.ExpressionSerializer;
+import io.trino.server.PluginManager.PluginsProvider;
 import io.trino.server.SliceSerialization.SliceDeserializer;
 import io.trino.server.SliceSerialization.SliceSerializer;
 import io.trino.server.remotetask.HttpLocationFactory;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
+import io.trino.spi.VersionEmbedder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.type.Type;
@@ -221,6 +224,9 @@ public class ServerMainModule
         // table properties
         binder.bind(TablePropertyManager.class).in(Scopes.SINGLETON);
 
+        // materialized view properties
+        binder.bind(MaterializedViewPropertyManager.class).in(Scopes.SINGLETON);
+
         // column properties
         binder.bind(ColumnPropertyManager.class).in(Scopes.SINGLETON);
 
@@ -277,7 +283,7 @@ public class ServerMainModule
         configBinder(binder).bindConfig(NodeMemoryConfig.class);
         binder.bind(LocalMemoryManager.class).in(Scopes.SINGLETON);
         binder.bind(LocalMemoryManagerExporter.class).in(Scopes.SINGLETON);
-        binder.bind(EmbedVersion.class).in(Scopes.SINGLETON);
+        newOptionalBinder(binder, VersionEmbedder.class).setDefault().to(EmbedVersion.class).in(Scopes.SINGLETON);
         newExporter(binder).export(TaskManager.class).withGeneratedName();
         binder.bind(TaskExecutor.class).in(Scopes.SINGLETON);
         newExporter(binder).export(TaskExecutor.class).withGeneratedName();
@@ -409,7 +415,9 @@ public class ServerMainModule
 
         // plugin manager
         binder.bind(PluginManager.class).in(Scopes.SINGLETON);
-        configBinder(binder).bindConfig(PluginManagerConfig.class);
+        newOptionalBinder(binder, PluginsProvider.class).setDefault()
+                .to(ServerPluginsProvider.class).in(Scopes.SINGLETON);
+        configBinder(binder).bindConfig(ServerPluginsProviderConfig.class);
 
         binder.bind(CatalogManager.class).in(Scopes.SINGLETON);
 

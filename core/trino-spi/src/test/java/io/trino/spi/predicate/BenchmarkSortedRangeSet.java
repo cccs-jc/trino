@@ -24,17 +24,16 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
+import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
+import static io.trino.spi.predicate.Range.range;
 import static io.trino.spi.type.BigintType.BIGINT;
 
 @Fork(1)
@@ -169,6 +168,36 @@ public class BenchmarkSortedRangeSet
         return result;
     }
 
+    @Benchmark
+    public List<Integer> getOrderedRangesSmall(Data data)
+    {
+        return benchmarkGetOrderedRanges(data.smallRanges);
+    }
+
+    @Benchmark
+    public List<Integer> getOrderedRangesLarge(Data data)
+    {
+        return benchmarkGetOrderedRanges(data.largeRanges);
+    }
+
+    private List<Integer> benchmarkGetOrderedRanges(List<SortedRangeSet> dataRanges)
+    {
+        List<Integer> result = new ArrayList<>(dataRanges.size());
+        for (int index = 0; index < dataRanges.size(); index++) {
+            int hash = 0;
+            for (Range orderedRange : dataRanges.get(index).getRanges().getOrderedRanges()) {
+                if (!orderedRange.isLowUnbounded()) {
+                    hash = hash * 31 + orderedRange.getLowBoundedValue().hashCode();
+                }
+                if (!orderedRange.isHighUnbounded()) {
+                    hash = hash * 31 + orderedRange.getHighBoundedValue().hashCode();
+                }
+            }
+            result.add(hash);
+        }
+        return result;
+    }
+
     @State(Scope.Thread)
     public static class Data
     {
@@ -187,7 +216,7 @@ public class BenchmarkSortedRangeSet
                 long to = ThreadLocalRandom.current().nextLong(100) + (factor + 1) * 100;
                 factor++;
 
-                ranges.add(new Range(Marker.above(BIGINT, from), Marker.below(BIGINT, to)));
+                ranges.add(range(BIGINT, from, false, to, false));
             }
 
             smallRanges = generateRangeSets(500_000, 2);
@@ -213,14 +242,36 @@ public class BenchmarkSortedRangeSet
         }
     }
 
+    @Test
+    public void test()
+    {
+        Data data = new Data();
+        data.init();
+
+        benchmarkBuilder(data);
+
+        equalsSmall(data);
+        equalsLarge(data);
+
+        unionSmall(data);
+        unionLarge(data);
+
+        overlapsSmall(data);
+        overlapsLarge(data);
+
+        containsValueSmall(data);
+        containsValueLarge(data);
+
+        complementSmall(data);
+        complementLarge(data);
+
+        getOrderedRangesSmall(data);
+        getOrderedRangesLarge(data);
+    }
+
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkSortedRangeSet.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkSortedRangeSet.class).run();
     }
 }
